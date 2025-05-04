@@ -1,1 +1,3 @@
 .idea
+embeddings/*.txt
+embeddings/*.npy
