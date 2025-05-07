@@ -59,7 +59,7 @@ def rerank_with_llm(prompt):
     """Отправляет запрос к LLM и получает ответ."""
     try:
         response = requests.post(
-            "http://172.19.176.1:1234/v1/completions",
+            "http://172.25.96.1:1234/v1/completions",
             json={
                 "prompt": prompt,
                 "temperature": 0,
@@ -109,13 +109,8 @@ def add_triple_to_dataset(head, relation, tail, file_path):
             f.write(f"{head}\t{relation}\t{tail}\n")
 
 def knowledge_graph_completion_and_add(head, relation, file_path):
-    candidates = retrieve_candidates(head, relation)
-    if not candidates:
-        print("Нет кандидатов для данного запроса.")
-        return
-    prompt = build_prompt(head, relation, candidates)
-    llm_response = rerank_with_llm(prompt)
-    tail = parse_llm_response(llm_response, candidates)
+    tail = knowledge_graph_completion(head, relation)
+
     if tail:
         add_triple_to_dataset(head, relation, tail, file_path)
 
@@ -128,13 +123,14 @@ def knowledge_graph_completion(head, relation):
     candidates = retrieve_candidates(head, relation)
 
     if not candidates:
-        return "Нет кандидатов для данного запроса."
+        return None
 
     prompt = build_prompt(head, relation, candidates)
 
-    ranked_candidates = rerank_with_llm(prompt)
+    llm_response = rerank_with_llm(prompt)
+    tail = parse_llm_response(llm_response, candidates)
 
-    return ranked_candidates
+    return tail
 
 output_file = 'dataset/relations_ru_completed.txt'
 
