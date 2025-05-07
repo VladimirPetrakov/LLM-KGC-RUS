@@ -120,6 +120,10 @@ def knowledge_graph_completion_and_add(head, relation, file_path):
 
 def knowledge_graph_completion(head, relation):
     """Основная функция для завершения графа знаний."""
+    existing = [t for h, r, t in triples_raw if h == head and r == relation]
+    if existing:
+        return existing[0]
+
     candidates = retrieve_candidates(head, relation)
 
     if not candidates:
