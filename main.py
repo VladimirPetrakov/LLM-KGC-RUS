@@ -12,7 +12,6 @@ entity_embeddings = np.load('embeddings/entity_embeddings.npy')
 entity2id = load_json_from_file('embeddings/entity2id.txt')
 relation2id = load_json_from_file('embeddings/relation2id.txt')
 
-
 def retrieve_candidates(head, relation, top_m=5):
     """Извлекает кандидатов на основе эмбеддингов."""
     if head not in entity2id or relation not in relation2id:
@@ -20,24 +19,22 @@ def retrieve_candidates(head, relation, top_m=5):
 
     head_id = entity2id[head]
     relation_id = relation2id[relation]
-
     head_emb = entity_embeddings[head_id]
     relation_emb = relation_embeddings[relation_id]
-
     query_emb = head_emb + relation_emb
+
     sims = cosine_similarity(query_emb.reshape(1, -1), entity_embeddings)[0]
 
     known_tails = set(t for h, r, t in triples_raw if h == head and r == relation)
-    valid_tail_set = set(t for _, r, t in triples_raw if r == relation)
 
     candidates = []
     for idx in sims.argsort()[::-1]:
         cand = entities[idx]
-        if cand in valid_tail_set and cand not in known_tails:
+
+        if cand != head and cand not in known_tails:
             candidates.append(cand)
         if len(candidates) == top_m:
             break
-
     return candidates
 
 
@@ -60,7 +57,6 @@ def build_prompt(head, relation, candidates):
 
 def rerank_with_llm(prompt):
     """Отправляет запрос к LLM и получает ответ."""
-    print(prompt)
     try:
         response = requests.post(
             "http://172.19.176.1:1234/v1/completions",
@@ -111,9 +107,6 @@ def add_triple_to_dataset(head, relation, tail, file_path):
         triples_raw.append((head, relation, tail))
         with open(file_path, 'w+', encoding='utf-8') as f:
             f.write(f"{head}\t{relation}\t{tail}\n")
-        print(f"Добавлен новый триплет: {head} - {relation} - {tail}")
-    else:
-        print("Триплет уже есть в датасете.")
 
 def knowledge_graph_completion_and_add(head, relation, file_path):
     candidates = retrieve_candidates(head, relation)
