@@ -1,18 +1,20 @@
-import numpy as nm
+import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 import requests
 from triplets import load_triples
 from triplets import load_json_from_file
 
+# Загрузка данных
 triples_raw, entities, relations = load_triples('dataset/relations_ru.txt')
-
-relation_embeddings = nm.load('embeddings/relation_embeddings.npy')
-entity_embeddings = nm.load('embeddings/entity_embeddings.npy')
+relation_embeddings = np.load('embeddings/relation_embeddings.npy')
+entity_embeddings = np.load('embeddings/entity_embeddings.npy')
 
 entity2id = load_json_from_file('embeddings/entity2id.txt')
 relation2id = load_json_from_file('embeddings/relation2id.txt')
 
+
 def retrieve_candidates(head, relation, top_m=5):
+    """Извлекает кандидатов на основе эмбеддингов."""
     if head not in entity2id or relation not in relation2id:
         return []
 
@@ -23,23 +25,42 @@ def retrieve_candidates(head, relation, top_m=5):
     relation_emb = relation_embeddings[relation_id]
 
     query_emb = head_emb + relation_emb
-
     sims = cosine_similarity(query_emb.reshape(1, -1), entity_embeddings)[0]
-    top_indices = sims.argsort()[-top_m:][::-1]
 
-    candidates = [entities[i] for i in top_indices]
+    known_tails = set(t for h, r, t in triples_raw if h == head and r == relation)
+    valid_tail_set = set(t for _, r, t in triples_raw if r == relation)
+
+    candidates = []
+    for idx in sims.argsort()[::-1]:
+        cand = entities[idx]
+        if cand in valid_tail_set and cand not in known_tails:
+            candidates.append(cand)
+        if len(candidates) == top_m:
+            break
 
     return candidates
 
+
+def get_ego_graph(head):
+    """Получает эго-граф для заданной сущности."""
+    return [f"{h}-{r}-{t}" for h, r, t in triples_raw if h == head][:3]
+
+
 def build_prompt(head, relation, candidates):
-    prompt = f"Дано: {head} - {relation} - ?\n"
-    prompt += "Выберите наиболее вероятные варианты из списка:\n"
-    for i, cand in enumerate(candidates, 1):
-        prompt += f"{i}. {cand}\n"
-    prompt += "Отранжируйте кандидатов по вероятности."
+    """Строит промпт для LLM."""
+    context = "\n".join(get_ego_graph(head))
+    prompt = (
+        f"Контекст:\n{context}\n\n"
+        f"Запрос: {head} - {relation} - ?\n"
+        f"Варианты кандидатов: {', '.join(candidates)}\n\n"
+        "Пожалуйста, отранжируйте кандидатов по вероятности и укажите один самый вероятный ответ."
+    )
     return prompt
 
+
 def rerank_with_llm(prompt):
+    """Отправляет запрос к LLM и получает ответ."""
+    print(prompt)
     try:
         response = requests.post(
             "http://172.19.176.1:1234/v1/completions",
@@ -57,16 +78,76 @@ def rerank_with_llm(prompt):
         print(f"Ошибка при запросе к LLM: {e}")
         return "Ошибка при ранжировании кандидатов."
 
-def knowledge_graph_completion(head, relation):
+import re
+
+def parse_llm_response(response_text, candidates):
+    """
+    Парсит ответ LLM и возвращает наиболее вероятного tail-кандидата.
+    """
+    # 1. Если в ответе есть строка, совпадающая с кандидатом - берем ее
+    for cand in candidates:
+        if cand in response_text:
+            return cand
+
+    # 2. Если ответ - просто URI (одна строка)
+    lines = [line.strip() for line in response_text.splitlines() if line.strip()]
+    for line in lines:
+        if line in candidates:
+            return line
+
+    # 3. Если ответ - "1. ..." или "1) ..."
+    for line in lines:
+        m = re.match(r"1[\.\)]\s*(\S+)", line)
+        if m and m.group(1) in candidates:
+            return m.group(1)
+
+    return None
+
+def add_triple_to_dataset(head, relation, tail, file_path):
+    """
+    Добавляет новый триплет в датасет и сохраняет его.
+    """
+    if (head, relation, tail) not in triples_raw:
+        triples_raw.append((head, relation, tail))
+        with open(file_path, 'w+', encoding='utf-8') as f:
+            f.write(f"{head}\t{relation}\t{tail}\n")
+        print(f"Добавлен новый триплет: {head} - {relation} - {tail}")
+    else:
+        print("Триплет уже есть в датасете.")
+
+def knowledge_graph_completion_and_add(head, relation, file_path):
     candidates = retrieve_candidates(head, relation)
     if not candidates:
-        return "Нет кандидатов для данного запроса."
+        print("Нет кандидатов для данного запроса.")
+        return
     prompt = build_prompt(head, relation, candidates)
+    llm_response = rerank_with_llm(prompt)
+    tail = parse_llm_response(llm_response, candidates)
+    if tail:
+        add_triple_to_dataset(head, relation, tail, file_path)
+
+        return tail
+    else:
+        print("Не удалось распарсить ответ LLM.")
+
+def knowledge_graph_completion(head, relation):
+    """Основная функция для завершения графа знаний."""
+    candidates = retrieve_candidates(head, relation)
+
+    if not candidates:
+        return "Нет кандидатов для данного запроса."
+
+    prompt = build_prompt(head, relation, candidates)
+
     ranked_candidates = rerank_with_llm(prompt)
+
     return ranked_candidates
 
-result = knowledge_graph_completion("http://ru.dbpedia.org/resource/Unity_(альбом_Rage)", "http://dbpedia.org/ontology/producer")
+output_file = 'dataset/relations_ru_completed.txt'
+
+result = knowledge_graph_completion_and_add("http://ru.dbpedia.org/resource/Interview_(альбом)",
+                                    "http://dbpedia.org/ontology/artist",
+                                            output_file)
 
 print("\nРезультат завершения графа знаний:")
-
 print(result)

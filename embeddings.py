@@ -1,12 +1,14 @@
-import numpy as nm
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import random
-from triplets import load_triples
-from triplets import save_json_to_file
+from triplets import load_triples, save_json_to_file
+
 
 class TransE(nn.Module):
+    """ТрансЭмбеддинг модель для представления сущностей и отношений."""
+
     def __init__(self, num_entities, num_relations, embedding_dim):
         super(TransE, self).__init__()
         self.entity_embeddings = nn.Embedding(num_entities, embedding_dim)
@@ -15,13 +17,16 @@ class TransE(nn.Module):
         nn.init.xavier_uniform_(self.relation_embeddings.weight.data)
 
     def forward(self, head, relation, tail):
+        """Вычисляет оценку для заданных головной сущности, отношения и хвоста."""
         head_emb = self.entity_embeddings(head)
         relation_emb = self.relation_embeddings(relation)
         tail_emb = self.entity_embeddings(tail)
         score = (head_emb + relation_emb - tail_emb).norm(p=2, dim=1)
         return score
 
+
 def generate_negative_samples(triples, num_entities):
+    """Генерирует негативные выборки для обучения."""
     corrupted_triples = []
     for h, r, t in triples:
         if random.random() < 0.5:
@@ -32,48 +37,53 @@ def generate_negative_samples(triples, num_entities):
             corrupted_triples.append((h, r, t_corrupt))
     return corrupted_triples
 
-def train_transe(triples, num_entities, num_relations, embedding_dim=50, learning_rate=0.01, epochs=10, batch_size=128):
+
+def train_transe(triples, num_entities, num_relations,
+                 embedding_dim=50,
+                 learning_rate=0.01,
+                 epochs=10,
+                 batch_size=128):
+    """Обучает модель TransE на заданных тройках."""
     model = TransE(num_entities, num_relations, embedding_dim)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    criterion = nn.MarginRankingLoss(margin=1.0)
-
     triples_tensor = torch.tensor(triples, dtype=torch.long)
+
+    loss_fn = nn.MarginRankingLoss(margin=1.0)
 
     for epoch in range(epochs):
         model.train()
-
         perm = torch.randperm(len(triples))
         triples_tensor = triples_tensor[perm]
-
         epoch_loss = 0
+
         for i in range(0, len(triples), batch_size):
-            batch = triples_tensor[i:i+batch_size]
-            head = batch[:,0]
-            relation = batch[:,1]
-            tail = batch[:,2]
+            batch = triples_tensor[i:i + batch_size]
+            head = batch[:, 0]
+            relation = batch[:, 1]
+            tail = batch[:, 2]
 
             corrupted_batch = generate_negative_samples(batch.tolist(), num_entities)
-            corrupted_batch = torch.tensor(corrupted_batch, dtype=torch.long)
-            head_corrupt = corrupted_batch[:,0]
-            relation_corrupt = corrupted_batch[:,1]
-            tail_corrupt = corrupted_batch[:,2]
+            corrupted_batch_tensor = torch.tensor(corrupted_batch, dtype=torch.long)
+            head_corrupt = corrupted_batch_tensor[:, 0]
+            relation_corrupt = corrupted_batch_tensor[:, 1]
+            tail_corrupt = corrupted_batch_tensor[:, 2]
 
             optimizer.zero_grad()
-            score_pos = model(head, relation, tail)
-            score_neg = model(head_corrupt, relation_corrupt, tail_corrupt)
 
-            y = torch.ones(len(score_pos))
-            loss = criterion(score_pos, score_neg, y)
-            loss.backward()
+            pos_score = model(head, relation, tail)
+            neg_score = model(head_corrupt, relation_corrupt, tail_corrupt)
+
+            target = torch.ones(pos_score.size(), device=pos_score.device) * -1
+
+            loss_total = loss_fn(pos_score, neg_score, target)
+            loss_total.backward()
             optimizer.step()
-            epoch_loss += loss.item()
+            epoch_loss += loss_total.item()
 
         avg_loss = epoch_loss / (len(triples) / batch_size)
-        print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}")
+        print(f"Epoch {epoch + 1}/{epochs}, Loss: {avg_loss:.4f}")
 
     return model.entity_embeddings.weight.data.cpu().numpy(), model.relation_embeddings.weight.data.cpu().numpy()
-
-
 
 triples_raw, entities, relations = load_triples('dataset/relations_ru.txt')
 
@@ -88,9 +98,11 @@ num_entities = len(entities)
 num_relations = len(relations)
 
 entity_embeddings, relation_embeddings = train_transe(
-    triples, num_entities, num_relations, embedding_dim=50, learning_rate=0.01, epochs=20
+    triples, num_entities, num_relations,
+    embedding_dim=50,
+    learning_rate=0.01,
+    epochs=20
 )
 
-nm.save('embeddings/relation_embeddings.npy', relation_embeddings)
-nm.save('embeddings/entity_embeddings.npy', entity_embeddings)
-
+np.save('embeddings/relation_embeddings.npy', relation_embeddings)
+np.save('embeddings/entity_embeddings.npy', entity_embeddings)
