@@ -1,4 +1,5 @@
 import random
+from collections import defaultdict
 
 def load_dataset(file_path):
     """
@@ -12,6 +13,29 @@ def load_dataset(file_path):
             if len(parts) == 3:
                 triples.append(tuple(parts))
     return triples
+
+def stratified_downsample(positive_samples, fraction=0.3):
+    """
+    Выполняет стратифицированное уменьшение положительных примеров по признаку predicate.
+
+    positive_samples: список кортежей (subject, predicate, object, label=1)
+    fraction: доля, которую нужно оставить в каждой группе
+
+    Возвращает список уменьшенных положительных примеров.
+    """
+
+    groups = defaultdict(list)
+    for sample in positive_samples:
+        predicate = sample[1]
+        groups[predicate].append(sample)
+
+    downsampled = []
+    for predicate, samples in groups.items():
+        sample_size = max(1, int(len(samples) * fraction))  # минимум 1 пример из группы
+        chosen = random.sample(samples, sample_size)
+        downsampled.extend(chosen)
+
+    return downsampled
 
 def generate_negative_samples(triples, num_samples=1000):
     """
@@ -39,7 +63,7 @@ def save_dataset(triples_with_labels, output_file):
     Сохраняет датасет в TSV файл с четырьмя колонками:
     subject, predicate, object, label
     """
-    with open(output_file, 'w', encoding='utf-8') as f:
+    with open(output_file, 'w+', encoding='utf-8') as f:
         for subj, pred, obj, label in triples_with_labels:
             f.write(f"{subj}\t{pred}\t{obj}\t{label}\n")
 
@@ -50,20 +74,20 @@ def main():
     print(f"Загрузка датасета из {input_file}...")
     triples = load_dataset(input_file)
 
-    print(f"Всего положительных примеров: {len(triples)}")
     positive_samples = [(s, p, o, 1) for s, p, o in triples]
+    print(f"Всего положительных примеров: {len(positive_samples)}")
 
-    print("Генерируем отрицательные примеры...")
+    print("Выполняем стратифицированное уменьшение положительных примеров...")
+    positive_samples_downsampled = stratified_downsample(positive_samples, fraction=0.3)
+    print(f"После уменьшения положительных примеров: {len(positive_samples_downsampled)}")
+
     negative_triples = generate_negative_samples(triples, num_samples=1000)
     negative_samples = [(s, p, o, 0) for s, p, o in negative_triples]
 
-    print("Объединяем данные...")
-    merged = positive_samples + negative_samples
-
-    print(f"Сохраняем объединённый датасет в {output_file}...")
+    merged = positive_samples_downsampled + negative_samples
     save_dataset(merged, output_file)
 
-    print("Готово!")
+    print(f"Объединённый датасет сохранён в {output_file}")
 
 if __name__ == "__main__":
     main()
