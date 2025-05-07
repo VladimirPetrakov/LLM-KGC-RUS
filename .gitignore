@@ -2,3 +2,6 @@
 embeddings/*.txt
 embeddings/*.npy
 __pycache__
+dataset/relations_ru.txt
+dataset/relations_ru_train.tsv
+dataset/relations_ru_completed.txt

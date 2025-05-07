@@ -1,16 +1,16 @@
 import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
 import requests
-from triplets import load_triples
+from triplets import load_labeled_triples, load_triples
 from triplets import load_json_from_file
 
-# Загрузка данных
-triples_raw, entities, relations = load_triples('dataset/relations_ru.txt')
+triples_raw_all, entities, relations = load_triples('dataset/relations_ru.txt')
 relation_embeddings = np.load('embeddings/relation_embeddings.npy')
 entity_embeddings = np.load('embeddings/entity_embeddings.npy')
 
 entity2id = load_json_from_file('embeddings/entity2id.txt')
 relation2id = load_json_from_file('embeddings/relation2id.txt')
+
+triples_raw, labels = load_labeled_triples('dataset/relations_ru_train.tsv', entity2id, relation2id)
 
 def retrieve_candidates(head, relation, top_m=5):
     """Извлекает кандидатов на основе эмбеддингов."""
@@ -21,17 +21,14 @@ def retrieve_candidates(head, relation, top_m=5):
     relation_id = relation2id[relation]
     head_emb = entity_embeddings[head_id]
     relation_emb = relation_embeddings[relation_id]
-    query_emb = head_emb + relation_emb
-
-    sims = cosine_similarity(query_emb.reshape(1, -1), entity_embeddings)[0]
-
-    known_tails = set(t for h, r, t in triples_raw if h == head and r == relation)
+    query = head_emb + relation_emb
+    dists = np.linalg.norm(entity_embeddings - query, axis=1)
 
     candidates = []
-    for idx in sims.argsort()[::-1]:
+    for idx in np.argsort(dists):
         cand = entities[idx]
 
-        if cand != head and cand not in known_tails:
+        if cand != head:
             candidates.append(cand)
         if len(candidates) == top_m:
             break
@@ -44,13 +41,21 @@ def get_ego_graph(head):
 
 
 def build_prompt(head, relation, candidates):
-    """Строит промпт для LLM."""
+    """
+    Строит промпт для LLM с четкой инструкцией и примером формата ответа.
+    """
     context = "\n".join(get_ego_graph(head))
     prompt = (
         f"Контекст:\n{context}\n\n"
-        f"Запрос: {head} - {relation} - ?\n"
-        f"Варианты кандидатов: {', '.join(candidates)}\n\n"
-        "Пожалуйста, отранжируйте кандидатов по вероятности и укажите один самый вероятный ответ."
+        f"Задание:\n"
+        f"Дана неполная тройка: {head} - {relation} - ?\n"
+        f"Варианты кандидатов для объекта:\n"
+        + "\n".join(f"- {c}" for c in candidates) +
+        "\n\n"
+        "Выбери ОДНОГО наиболее вероятного кандидата (URI) из списка и верни ТОЛЬКО его URI без комментариев и пояснений.\n"
+        "Если не можешь выбрать, верни только 'None'.\n"
+        "Пример формата ответа:\n"
+        "http://ru.dbpedia.org/resource/Some_Entity\n"
     )
     return prompt
 
@@ -80,22 +85,27 @@ def parse_llm_response(response_text, candidates):
     """
     Парсит ответ LLM и возвращает наиболее вероятного tail-кандидата.
     """
-    # 1. Если в ответе есть строка, совпадающая с кандидатом - берем ее
+    response_text = response_text.strip()
+    if response_text.lower() == 'none':
+        return None
+
+    response_text = re.sub(r'[\[\]\(\)\'\"\`]', '', response_text)
+
+    for cand in candidates:
+        if cand == response_text:
+            return cand
+
     for cand in candidates:
         if cand in response_text:
             return cand
 
-    # 2. Если ответ - просто URI (одна строка)
-    lines = [line.strip() for line in response_text.splitlines() if line.strip()]
-    for line in lines:
-        if line in candidates:
-            return line
-
-    # 3. Если ответ - "1. ..." или "1) ..."
-    for line in lines:
-        m = re.match(r"1[\.\)]\s*(\S+)", line)
-        if m and m.group(1) in candidates:
-            return m.group(1)
+    for line in response_text.splitlines():
+        line = line.strip()
+        for cand in candidates:
+            if cand == line:
+                return cand
+            if cand in line:
+                return cand
 
     return None
 
@@ -138,9 +148,5 @@ def knowledge_graph_completion(head, relation):
 
 output_file = 'dataset/relations_ru_completed.txt'
 
-result = knowledge_graph_completion_and_add("http://ru.dbpedia.org/resource/Interview_(альбом)",
-                                    "http://dbpedia.org/ontology/artist",
-                                            output_file)
-
-print("\nРезультат завершения графа знаний:")
-print(result)
+for triple in triples_raw_all:
+    result = knowledge_graph_completion_and_add(triple[0], triple[1], output_file)
