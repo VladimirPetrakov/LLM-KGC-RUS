@@ -1,3 +1,4 @@
 .idea
 embeddings/*.txt
 embeddings/*.npy
+__pycache__
