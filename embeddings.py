@@ -3,6 +3,9 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
+import random
+from sklearn.model_selection import train_test_split
+from triplets import load_triples, load_labeled_triples, save_json_to_file
 
 class TransE(nn.Module):
     def __init__(self, num_entities, num_relations, embedding_dim):
@@ -30,40 +33,51 @@ class TriplesDataset(Dataset):
         triple = self.triples[idx]
         return torch.tensor(triple, dtype=torch.long)
 
-def generate_hard_negative_samples_vectorized(model, pos_triples, num_entities, triples_set,
-                                             num_hard_neg=1, max_candidates=20, device='cpu'):
+def generate_hard_negative_samples_batch(
+    model, pos_batch, num_entities, triples_set,
+    num_hard_neg=1, max_candidates=20, device='cpu'
+):
+    """
+    Быстрая батчевая генерация hard negative samples для TransE.
+    Для каждого триплета в батче генерирует по num_hard_neg hard negative,
+    меняя head или tail, выбирает наиболее "трудные" негативы по скору модели.
+    """
     model.eval()
+    batch_size = pos_batch.size(0)
+    pos_batch = pos_batch.to(device)
+
     hard_negatives = []
 
-    entity_emb = model.entity_embeddings.weight.data.to(device)
-    relation_emb = model.relation_embeddings.weight.data.to(device)
+    for i in range(batch_size):
+        h, r, t = pos_batch[i].tolist()
 
-    for h, r, t in pos_triples:
-        tail_candidates = [i for i in range(num_entities) if i != t and (h, r, i) not in triples_set]
-        if len(tail_candidates) > max_candidates:
-            tail_candidates = random.sample(tail_candidates, max_candidates)
-        if tail_candidates:
-            head_vec = entity_emb[h].unsqueeze(0)
-            rel_vec = relation_emb[r].unsqueeze(0)
-            tail_vecs = entity_emb[tail_candidates]
+        candidates = []
+        while len(candidates) < max_candidates:
+            candidate = random.randint(0, num_entities - 1)
+            if candidate != h and (candidate, r, t) not in triples_set:
+                candidates.append(candidate)
+        head_cands = torch.tensor(candidates, device=device)
+        rel = torch.tensor([r]*max_candidates, device=device)
+        tail = torch.tensor([t]*max_candidates, device=device)
+        scores = model(head_cands, rel, tail)
+        topk = torch.topk(scores, k=num_hard_neg, largest=False)
+        for idx in topk.indices.cpu().numpy():
+            hard_negatives.append((candidates[idx], r, t))
 
-            scores = torch.norm(head_vec + rel_vec - tail_vecs, p=2, dim=1)
-            topk = torch.topk(scores, k=min(num_hard_neg, len(scores)), largest=False)
-            for idx in topk.indices.cpu().numpy():
-                hard_negatives.append((h, r, tail_candidates[idx]))
-
-        head_candidates = [i for i in range(num_entities) if i != h and (i, r, t) not in triples_set]
-        if len(head_candidates) > max_candidates:
-            head_candidates = random.sample(head_candidates, max_candidates)
-        if head_candidates:
-            tail_vec = entity_emb[t].unsqueeze(0)
-            rel_vec = relation_emb[r].unsqueeze(0)
-            head_vecs = entity_emb[head_candidates]
-
-            scores = torch.norm(head_vecs + rel_vec - tail_vec, p=2, dim=1)
-            topk = torch.topk(scores, k=min(num_hard_neg, len(scores)), largest=False)
-            for idx in topk.indices.cpu().numpy():
-                hard_negatives.append((head_candidates[idx], r, t))
+    for i in range(batch_size):
+        h, r, t = pos_batch[i].tolist()
+        candidates = []
+        while len(candidates) < max_candidates:
+            candidate = random.randint(0, num_entities - 1)
+            if candidate != t and (h, r, candidate) not in triples_set:
+                candidates.append(candidate)
+        head = torch.tensor([h]*max_candidates, device=device)
+        rel = torch.tensor([r]*max_candidates, device=device)
+        tail_cands = torch.tensor(candidates, device=device)
+        scores = model(head, rel, tail_cands)
+        topk = torch.topk(scores, k=num_hard_neg, largest=False)
+        for idx in topk.indices.cpu().numpy():
+            hard_negatives.append((h, r, candidates[idx]))
 
     return hard_negatives
 
@@ -89,10 +103,8 @@ def train_transe(triples, num_entities, num_relations,
             rel_pos = pos_batch[:, 1]
             tail_pos = pos_batch[:, 2]
 
-            pos_triples = [tuple(x) for x in pos_batch.cpu().tolist()]
-
-            neg_batch = generate_hard_negative_samples_vectorized(
-                model, pos_triples, num_entities, triples_set,
+            neg_batch = generate_hard_negative_samples_batch(
+                model, pos_batch, num_entities, triples_set,
                 num_hard_neg=1, max_candidates=20, device=device
             )
             if not neg_batch:
@@ -139,11 +151,7 @@ def evaluate(model, triples, labels, batch_size=128, device='cpu'):
     return correct / total
 
 if __name__ == "__main__":
-    import random
-    from sklearn.model_selection import train_test_split
-    from triplets import load_triples, load_labeled_triples, save_json_to_file
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
     triples_raw, entities, relations = load_triples('dataset/relations_ru.txt')
@@ -162,7 +170,7 @@ if __name__ == "__main__":
 
     entity_embeddings, relation_embeddings, model = train_transe(
         train_triples, num_entities, num_relations,
-        embedding_dim=100, learning_rate=0.005, epochs=40, batch_size=128, device=device
+        embedding_dim=100, learning_rate=0.001, epochs=300, batch_size=128, device=device
     )
 
     test_acc = evaluate(model, test_triples, test_labels, device=device)

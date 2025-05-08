@@ -76,7 +76,7 @@ def main():
     print(f"Всего положительных примеров: {len(positive_samples)}")
 
     print("Выполняем стратифицированное уменьшение положительных примеров...")
-    positive_samples_downsampled = stratified_downsample(positive_samples, fraction=0.5)
+    positive_samples_downsampled = stratified_downsample(positive_samples, fraction=0.7)
     print(f"После уменьшения положительных примеров: {len(positive_samples_downsampled)}")
 
     entities = list(set([t[0] for t in triples] + [t[2] for t in triples]))
@@ -88,8 +88,8 @@ def main():
     save_dataset(merged, output_file)
 
     print(f"Объединённый датасет сохранён в {output_file}")
+
 def analyze_dataset(tsv_path):
-    from collections import Counter
     triples = []
     labels = []
     with open(tsv_path, encoding='utf-8') as f:
