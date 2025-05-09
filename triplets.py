@@ -40,3 +40,10 @@ def load_json_from_file(file_path):
             return json.load(file)
     except FileNotFoundError:
         return {}
+
+def triples_to_ids(triples, entity2id, relation2id):
+    return [
+        (entity2id[h], relation2id[r], entity2id[t])
+        for (h, r, t) in triples
+        if h in entity2id and r in relation2id and t in entity2id
+    ]

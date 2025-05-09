@@ -89,6 +89,12 @@ def main():
 
     print(f"Объединённый датасет сохранён в {output_file}")
 
+    positives = set(triples)
+    negatives = set(negative_triples)
+
+    intersect = positives & negatives
+    print(f"Совпадающих троек: {len(intersect)}")
+
 def analyze_dataset(tsv_path):
     triples = []
     labels = []

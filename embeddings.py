@@ -5,7 +5,7 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import random
 from sklearn.model_selection import train_test_split
-from triplets import load_triples, load_labeled_triples, save_json_to_file
+from triplets import load_triples, load_labeled_triples, save_json_to_file, triples_to_ids
 import matplotlib.pyplot as plt
 
 class TransE(nn.Module):
@@ -36,7 +36,7 @@ class TriplesDataset(Dataset):
 
 def generate_hard_negative_samples_batch(
     model, pos_batch, num_entities, triples_set,
-    max_candidates=20, device='cpu'
+    max_candidates=50, device='cpu'
 ):
     """
     Для каждого триплета в батче генерирует по одному hard negative,
@@ -101,7 +101,7 @@ def train_transe(triples, num_entities, num_relations,
 
             neg_batch = generate_hard_negative_samples_batch(
                 model, pos_batch, num_entities, triples_set,
-                max_candidates=20, device=device
+                max_candidates=50, device=device
             )
             if not neg_batch:
                 continue
@@ -146,34 +146,45 @@ def evaluate(model, triples, labels, batch_size=128, device='cpu'):
             correct += (preds == batch_labels).sum().item()
             total += len(batch_labels)
     return correct / total
-
-def plot_score_distribution(model, triples, labels, entity2id, relation2id, device='cpu'):
+def plot_score_distribution(model, triples, labels, entity2id=None, relation2id=None, device='cpu'):
+    """
+    Если triples - список строковых троек, entity2id и relation2id - словари для перевода.
+    Если triples - список кортежей чисел, entity2id и relation2id можно не передавать.
+    """
     model.eval()
-    triples_ids = [
-        (entity2id[h], relation2id[r], entity2id[t])
-        for (h, r, t) in triples
-        if h in entity2id and r in relation2id and t in entity2id
-    ]
-    labels = [label for (h, r, t), label in zip(triples, labels)
-              if h in entity2id and r in relation2id and t in entity2id]
-    triples_tensor = torch.tensor(triples_ids, dtype=torch.long, device=device)
+    if entity2id is not None and relation2id is not None and len(triples) > 0 and isinstance(triples[0][0], str):
+        triples_ids = []
+        filtered_labels = []
+        for (h, r, t), label in zip(triples, labels):
+            if h in entity2id and r in relation2id and t in entity2id:
+                triples_ids.append((entity2id[h], relation2id[r], entity2id[t]))
+                filtered_labels.append(label)
+        triples_tensor = torch.tensor(triples_ids, dtype=torch.long, device=device)
+        labels_array = np.array(filtered_labels)
+    else:
+        triples_tensor = torch.tensor(triples, dtype=torch.long, device=device)
+        labels_array = np.array(labels)
+
     scores = []
+    batch_size = 128
     with torch.no_grad():
-        for i in range(0, len(triples_tensor), 128):
-            batch = triples_tensor[i:i+128]
+        for i in range(0, len(triples_tensor), batch_size):
+            batch = triples_tensor[i:i+batch_size]
             head = batch[:, 0]
             relation = batch[:, 1]
             tail = batch[:, 2]
             batch_scores = model(head, relation, tail)
             scores.extend(batch_scores.cpu().numpy())
+
     scores = np.array(scores)
-    labels = np.array(labels)
-    plt.hist(scores[labels == 1], bins=50, alpha=0.5, label='positive')
-    plt.hist(scores[labels == 0], bins=50, alpha=0.5, label='negative')
+
+    plt.figure(figsize=(8,6))
+    plt.hist(scores[labels_array == 1], bins=50, alpha=0.6, label='Позитивные')
+    plt.hist(scores[labels_array == 0], bins=50, alpha=0.6, label='Негативные')
+    plt.xlabel('Score (расстояние)')
+    plt.ylabel('Количество')
+    plt.title('Распределение скорингов модели TransE')
     plt.legend()
-    plt.title("Score Distribution")
-    plt.xlabel("Score (distance)")
-    plt.ylabel("Count")
     plt.show()
 
 if __name__ == "__main__":
@@ -188,29 +199,24 @@ if __name__ == "__main__":
 
     triples, labels = load_labeled_triples('dataset/relations_ru_train.tsv')
 
-    triple_ids = [
-        (entity2id[h], relation2id[r], entity2id[t])
-        for (h, r, t) in triples
-        if h in entity2id and r in relation2id and t in entity2id
-    ]
-
-    num_entities = len(entities)
-    num_relations = len(relations)
+    triples_ids = triples_to_ids(triples, entity2id, relation2id)
 
     train_triples, test_triples, train_labels, test_labels = train_test_split(
-        triples, labels, test_size=0.2, random_state=42
+        triples_ids, labels, test_size=0.2, random_state=42
     )
-
     train_triples, val_triples, train_labels, val_labels = train_test_split(
         train_triples, train_labels, test_size=0.2, random_state=42
     )
 
+    num_entities = len(entities)
+    num_relations = len(relations)
+
     entity_embeddings, relation_embeddings, model = train_transe(
-        triple_ids, num_entities, num_relations,
-        embedding_dim=300, learning_rate=0.0005, epochs=2, batch_size=128, device=device
+        train_triples, num_entities, num_relations,
+        embedding_dim=300, learning_rate=0.0005, epochs=10, batch_size=128, device=device
     )
 
-    plot_score_distribution(model, val_triples, val_labels, entity2id, relation2id, device=device)
+    plot_score_distribution(model, val_triples, val_labels, device=device)
 
     np.save('embeddings/relation_embeddings.npy', relation_embeddings)
     np.save('embeddings/entity_embeddings.npy', entity_embeddings)
