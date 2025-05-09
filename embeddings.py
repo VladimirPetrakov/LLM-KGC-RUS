@@ -1,12 +1,12 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import random
 from sklearn.model_selection import train_test_split
 from triplets import load_triples, load_labeled_triples, save_json_to_file, triples_to_ids
 import matplotlib.pyplot as plt
+from torch.utils.data import DataLoader, Dataset
 
 class TransE(nn.Module):
     def __init__(self, num_entities, num_relations, embedding_dim):
@@ -76,76 +76,86 @@ def generate_hard_negative_samples_batch(
             hard_negatives.append((h, r, candidates[idx]))
     return hard_negatives
 
-def train_transe(triples, num_entities, num_relations,
-                 embedding_dim=50, learning_rate=0.01, epochs=10, batch_size=128, device='cpu'):
+def train_transe(
+    train_triples, train_labels,
+    val_triples, val_labels,
+    num_entities, num_relations,
+    embedding_dim=200, learning_rate=0.001, epochs=300, batch_size=128, device='cpu'
+):
     model = TransE(num_entities, num_relations, embedding_dim).to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    criterion = nn.SoftMarginLoss()
 
-    loss_fn = nn.SoftMarginLoss()
+    train_dataset = TriplesDataset(train_triples)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
-    triples_set = set(tuple(triple) for triple in triples)
-    dataset = TriplesDataset(triples)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    triples_set = set(map(tuple, train_triples))
 
     for epoch in range(epochs):
         model.train()
-        epoch_loss = 0
-        for pos_batch in dataloader:
-            if not isinstance(pos_batch, torch.Tensor):
-                pos_batch = torch.tensor(pos_batch, dtype=torch.long)
-            pos_batch = pos_batch.long().to(device)
+        running_loss = 0.0
+        for i, pos_batch in enumerate(train_loader):
+            pos_batch = pos_batch.to(device)
 
             head_pos = pos_batch[:, 0]
-            rel_pos = pos_batch[:, 1]
+            relation_pos = pos_batch[:, 1]
             tail_pos = pos_batch[:, 2]
 
             neg_batch = generate_hard_negative_samples_batch(
-                model, pos_batch, num_entities, triples_set,
-                max_candidates=50, device=device
+                model, pos_batch, num_entities, triples_set, device=device
             )
-            if not neg_batch:
-                continue
 
-            neg_batch_tensor = torch.tensor(neg_batch, dtype=torch.long, device=device)
-            head_neg = neg_batch_tensor[:, 0]
-            rel_neg = neg_batch_tensor[:, 1]
-            tail_neg = neg_batch_tensor[:, 2]
+            neg_batch = torch.tensor(neg_batch, dtype=torch.long).to(device)
+            head_neg = neg_batch[:, 0]
+            relation_neg = neg_batch[:, 1]
+            tail_neg = neg_batch[:, 2]
 
             optimizer.zero_grad()
-            pos_scores = model(head_pos, rel_pos, tail_pos)
-            neg_scores = model(head_neg, rel_neg, tail_neg)
-            target = torch.ones_like(pos_scores)
 
-            loss = loss_fn(pos_scores - neg_scores, target)
+            pos_scores = model(head_pos, relation_pos, tail_pos)
+            neg_scores = model(head_neg, relation_neg, tail_neg)
+
+            labels = torch.cat([
+                torch.ones(pos_scores.size(0)),
+                torch.zeros(neg_scores.size(0))
+            ]).to(device)
+
+            scores = torch.cat([pos_scores, neg_scores])
+
+            loss = criterion(scores, labels)
+            running_loss += loss.item()
+
             loss.backward()
             optimizer.step()
-            epoch_loss += loss.item()
 
-        avg_loss = epoch_loss / len(dataloader)
-        print(f"Epoch {epoch + 1}/{epochs}, Loss: {avg_loss:.4f}")
-        val_acc = evaluate(model, val_triples, val_labels, device=device)
-        print(f"Validation Accuracy: {val_acc:.4f}")
+        model.eval()
+        with torch.no_grad():
+            val_acc = evaluate(model, val_triples, val_labels, device=device)
+            train_acc = evaluate(model, train_triples, train_labels, device=device)
 
-    return model.entity_embeddings.weight.data.cpu().numpy(), model.relation_embeddings.weight.data.cpu().numpy(), model
+            print(f"Epoch {epoch + 1}/{epochs}, Loss: {(running_loss / len(train_loader)):.4f},"
+                  f" Validation Accuracy: {val_acc:.4f}, Train Accuracy: {train_acc:.4f}")
 
-def evaluate(model, triples, labels, batch_size=128, device='cpu'):
+    entity_embeddings = model.entity_embeddings.weight.data.cpu().numpy()
+    relation_embeddings = model.relation_embeddings.weight.data.cpu().numpy()
+
+    return entity_embeddings, relation_embeddings, model
+
+def evaluate(model, triples, labels, device='cpu'):
     model.eval()
     triples_tensor = torch.tensor(triples, dtype=torch.long, device=device)
-    labels_tensor = torch.tensor(labels, dtype=torch.float, device=device)
-    correct = 0
-    total = 0
     with torch.no_grad():
-        for i in range(0, len(triples), batch_size):
-            batch = triples_tensor[i:i + batch_size]
-            batch_labels = labels_tensor[i:i + batch_size]
-            head = batch[:, 0]
-            relation = batch[:, 1]
-            tail = batch[:, 2]
-            scores = model(head, relation, tail)
-            preds = (torch.sigmoid(-scores) > 0.5).float()
-            correct += (preds == batch_labels).sum().item()
-            total += len(batch_labels)
-    return correct / total
+        head = triples_tensor[:, 0]
+        relation = triples_tensor[:, 1]
+        tail = triples_tensor[:, 2]
+        scores = model(head, relation, tail).cpu().numpy()
+        labels = np.array(labels)
+
+        threshold = np.median(scores)
+        preds = (scores < threshold).astype(int)
+        acc = (preds == labels).mean()
+    return acc
+
 def plot_score_distribution(model, triples, labels, entity2id=None, relation2id=None, device='cpu'):
     """
     Если triples - список строковых троек, entity2id и relation2id - словари для перевода.
@@ -187,36 +197,49 @@ def plot_score_distribution(model, triples, labels, entity2id=None, relation2id=
     plt.legend()
     plt.show()
 
-if __name__ == "__main__":
+def main():
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    triples_raw, entities, relations = load_triples('dataset/relations_ru.txt')
-    entity2id = {e: i for i, e in enumerate(entities)}
-    relation2id = {r: i for i, r in enumerate(relations)}
     save_json_to_file('embeddings/entity2id.txt', entity2id)
     save_json_to_file('embeddings/relation2id.txt', relation2id)
 
     triples, labels = load_labeled_triples('dataset/relations_ru_train.tsv')
-
-    triples_ids = triples_to_ids(triples, entity2id, relation2id)
-
     train_triples, test_triples, train_labels, test_labels = train_test_split(
-        triples_ids, labels, test_size=0.2, random_state=42
+        triples, labels, test_size=0.2, random_state=42
     )
     train_triples, val_triples, train_labels, val_labels = train_test_split(
         train_triples, train_labels, test_size=0.2, random_state=42
     )
 
-    num_entities = len(entities)
-    num_relations = len(relations)
+    train_triples_ids = triples_to_ids(train_triples, entity2id, relation2id)
+    val_triples_ids = triples_to_ids(val_triples, entity2id, relation2id)
+    test_triples_ids = triples_to_ids(test_triples, entity2id, relation2id)
 
     entity_embeddings, relation_embeddings, model = train_transe(
-        train_triples, num_entities, num_relations,
-        embedding_dim=300, learning_rate=0.0005, epochs=10, batch_size=128, device=device
+        train_triples_ids, train_labels,
+        val_triples_ids, val_labels,
+        num_entities=len(entity2id),
+        num_relations=len(relation2id),
+        embedding_dim=200,
+        learning_rate=0.001,
+        epochs=300,
+        batch_size=128,
+        device='cuda'
     )
 
-    plot_score_distribution(model, val_triples, val_labels, device=device)
+    test_acc = evaluate(model, test_triples_ids, test_labels, device=device)
+    print(f"Test Accuracy: {test_acc:.4f}")
+
+    plot_score_distribution(model, val_triples_ids, val_labels, device=device)
 
     np.save('embeddings/relation_embeddings.npy', relation_embeddings)
     np.save('embeddings/entity_embeddings.npy', entity_embeddings)
+
+
+triples_raw, entities, relations = load_triples('dataset/relations_ru.txt')
+entity2id = {e: i for i, e in enumerate(entities)}
+relation2id = {r: i for i, r in enumerate(relations)}
+
+if __name__ == "__main__":
+    main()
