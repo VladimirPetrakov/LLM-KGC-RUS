@@ -6,6 +6,7 @@ import numpy as np
 import random
 from sklearn.model_selection import train_test_split
 from triplets import load_triples, load_labeled_triples, save_json_to_file
+import matplotlib.pyplot as plt
 
 class TransE(nn.Module):
     def __init__(self, num_entities, num_relations, embedding_dim):
@@ -35,8 +36,12 @@ class TriplesDataset(Dataset):
 
 def generate_hard_negative_samples_batch(
     model, pos_batch, num_entities, triples_set,
-    num_hard_neg=1, max_candidates=20, device='cpu'
+    max_candidates=20, device='cpu'
 ):
+    """
+    Для каждого триплета в батче генерирует по одному hard negative,
+    меняя head или tail случайно.
+    """
     model.eval()
     batch_size = pos_batch.size(0)
     pos_batch = pos_batch.to(device)
@@ -53,9 +58,9 @@ def generate_hard_negative_samples_batch(
             rel = torch.tensor([r]*max_candidates, device=device)
             tail = torch.tensor([t]*max_candidates, device=device)
             scores = model(head_cands, rel, tail)
-            topk = torch.topk(scores, k=num_hard_neg, largest=False)
-            for idx in topk.indices.cpu().numpy():
-                hard_negatives.append((candidates[idx], r, t))
+            topk = torch.topk(scores, k=1, largest=False)
+            idx = topk.indices[0].item()
+            hard_negatives.append((candidates[idx], r, t))
         else:
             candidates = []
             while len(candidates) < max_candidates:
@@ -66,9 +71,9 @@ def generate_hard_negative_samples_batch(
             rel = torch.tensor([r]*max_candidates, device=device)
             tail_cands = torch.tensor(candidates, device=device)
             scores = model(head, rel, tail_cands)
-            topk = torch.topk(scores, k=num_hard_neg, largest=False)
-            for idx in topk.indices.cpu().numpy():
-                hard_negatives.append((h, r, candidates[idx]))
+            topk = torch.topk(scores, k=1, largest=False)
+            idx = topk.indices[0].item()
+            hard_negatives.append((h, r, candidates[idx]))
     return hard_negatives
 
 def train_transe(triples, num_entities, num_relations,
@@ -96,7 +101,7 @@ def train_transe(triples, num_entities, num_relations,
 
             neg_batch = generate_hard_negative_samples_batch(
                 model, pos_batch, num_entities, triples_set,
-                num_hard_neg=1, max_candidates=20, device=device
+                max_candidates=20, device=device
             )
             if not neg_batch:
                 continue
@@ -142,6 +147,35 @@ def evaluate(model, triples, labels, batch_size=128, device='cpu'):
             total += len(batch_labels)
     return correct / total
 
+def plot_score_distribution(model, triples, labels, entity2id, relation2id, device='cpu'):
+    model.eval()
+    triples_ids = [
+        (entity2id[h], relation2id[r], entity2id[t])
+        for (h, r, t) in triples
+        if h in entity2id and r in relation2id and t in entity2id
+    ]
+    labels = [label for (h, r, t), label in zip(triples, labels)
+              if h in entity2id and r in relation2id and t in entity2id]
+    triples_tensor = torch.tensor(triples_ids, dtype=torch.long, device=device)
+    scores = []
+    with torch.no_grad():
+        for i in range(0, len(triples_tensor), 128):
+            batch = triples_tensor[i:i+128]
+            head = batch[:, 0]
+            relation = batch[:, 1]
+            tail = batch[:, 2]
+            batch_scores = model(head, relation, tail)
+            scores.extend(batch_scores.cpu().numpy())
+    scores = np.array(scores)
+    labels = np.array(labels)
+    plt.hist(scores[labels == 1], bins=50, alpha=0.5, label='positive')
+    plt.hist(scores[labels == 0], bins=50, alpha=0.5, label='negative')
+    plt.legend()
+    plt.title("Score Distribution")
+    plt.xlabel("Score (distance)")
+    plt.ylabel("Count")
+    plt.show()
+
 if __name__ == "__main__":
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -152,12 +186,13 @@ if __name__ == "__main__":
     save_json_to_file('embeddings/entity2id.txt', entity2id)
     save_json_to_file('embeddings/relation2id.txt', relation2id)
 
-    triples_train, labels = load_labeled_triples('dataset/relations_ru_train.tsv')
+    triples, labels = load_labeled_triples('dataset/relations_ru_train.tsv')
 
-    triples = []
-    for h, r, t in triples_train:
-        if h in entity2id and r in relation2id and t in entity2id:
-            triples.append((entity2id[h], relation2id[r], entity2id[t]))
+    triple_ids = [
+        (entity2id[h], relation2id[r], entity2id[t])
+        for (h, r, t) in triples
+        if h in entity2id and r in relation2id and t in entity2id
+    ]
 
     num_entities = len(entities)
     num_relations = len(relations)
@@ -171,9 +206,11 @@ if __name__ == "__main__":
     )
 
     entity_embeddings, relation_embeddings, model = train_transe(
-        train_triples, num_entities, num_relations,
-        embedding_dim=300, learning_rate=0.001, epochs=300, batch_size=128, device=device
+        triple_ids, num_entities, num_relations,
+        embedding_dim=300, learning_rate=0.0005, epochs=2, batch_size=128, device=device
     )
+
+    plot_score_distribution(model, val_triples, val_labels, entity2id, relation2id, device=device)
 
     np.save('embeddings/relation_embeddings.npy', relation_embeddings)
     np.save('embeddings/entity_embeddings.npy', entity_embeddings)
