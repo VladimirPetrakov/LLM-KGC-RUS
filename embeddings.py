@@ -160,7 +160,13 @@ if __name__ == "__main__":
     save_json_to_file('embeddings/entity2id.txt', entity2id)
     save_json_to_file('embeddings/relation2id.txt', relation2id)
 
-    triples, labels = load_labeled_triples('dataset/relations_ru_train.tsv', entity2id, relation2id)
+    triples_train, labels = load_labeled_triples('dataset/relations_ru_train.tsv')
+
+    triples = []
+    for h, r, t in triples_train:
+        if h in entity2id and r in relation2id and t in entity2id:
+            triples.append((entity2id[h], relation2id[r], entity2id[t]))
+
     num_entities = len(entities)
     num_relations = len(relations)
 

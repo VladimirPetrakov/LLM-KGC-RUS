@@ -2,6 +2,7 @@ import numpy as np
 import requests
 from triplets import load_labeled_triples, load_triples
 from triplets import load_json_from_file
+import re
 
 triples_raw_all, entities, relations = load_triples('dataset/relations_ru.txt')
 relation_embeddings = np.load('embeddings/relation_embeddings.npy')
@@ -10,7 +11,7 @@ entity_embeddings = np.load('embeddings/entity_embeddings.npy')
 entity2id = load_json_from_file('embeddings/entity2id.txt')
 relation2id = load_json_from_file('embeddings/relation2id.txt')
 
-triples_raw, labels = load_labeled_triples('dataset/relations_ru_train.tsv', entity2id, relation2id)
+triples_raw, labels = load_labeled_triples('dataset/relations_ru_train.tsv')
 
 def retrieve_candidates(head, relation, top_m=5):
     """Извлекает кандидатов на основе эмбеддингов."""
@@ -32,6 +33,7 @@ def retrieve_candidates(head, relation, top_m=5):
             candidates.append(cand)
         if len(candidates) == top_m:
             break
+
     return candidates
 
 
@@ -64,7 +66,7 @@ def rerank_with_llm(prompt):
     """Отправляет запрос к LLM и получает ответ."""
     try:
         response = requests.post(
-            "http://172.25.96.1:1234/v1/completions",
+            "http://192.168.208.1:1234/v1/completions",
             json={
                 "prompt": prompt,
                 "temperature": 0,
@@ -78,8 +80,6 @@ def rerank_with_llm(prompt):
     except Exception as e:
         print(f"Ошибка при запросе к LLM: {e}")
         return "Ошибка при ранжировании кандидатов."
-
-import re
 
 def parse_llm_response(response_text, candidates):
     """
@@ -131,6 +131,7 @@ def knowledge_graph_completion_and_add(head, relation, file_path):
 def knowledge_graph_completion(head, relation):
     """Основная функция для завершения графа знаний."""
     existing = [t for h, r, t in triples_raw if h == head and r == relation]
+
     if existing:
         return existing[0]
 
