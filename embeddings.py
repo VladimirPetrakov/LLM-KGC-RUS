@@ -7,6 +7,7 @@ from sklearn.model_selection import train_test_split
 from triplets import load_triples, load_labeled_triples, save_json_to_file, triples_to_ids
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, Dataset
+from sklearn.metrics import roc_curve
 
 class TransE(nn.Module):
     def __init__(self, num_entities, num_relations, embedding_dim):
@@ -84,13 +85,13 @@ def train_transe(
 ):
     model = TransE(num_entities, num_relations, embedding_dim).to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    criterion = nn.SoftMarginLoss()
 
     train_dataset = TriplesDataset(train_triples)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
     triples_set = set(map(tuple, train_triples))
 
+    margin = 1
     for epoch in range(epochs):
         model.train()
         running_loss = 0.0
@@ -115,14 +116,8 @@ def train_transe(
             pos_scores = model(head_pos, relation_pos, tail_pos)
             neg_scores = model(head_neg, relation_neg, tail_neg)
 
-            labels = torch.cat([
-                torch.ones(pos_scores.size(0)),
-                torch.zeros(neg_scores.size(0))
-            ]).to(device)
+            loss = torch.relu(pos_scores - neg_scores + margin).mean()
 
-            scores = torch.cat([pos_scores, neg_scores])
-
-            loss = criterion(scores, labels)
             running_loss += loss.item()
 
             loss.backward()
@@ -149,11 +144,12 @@ def evaluate(model, triples, labels, device='cpu'):
         relation = triples_tensor[:, 1]
         tail = triples_tensor[:, 2]
         scores = model(head, relation, tail).cpu().numpy()
-        labels = np.array(labels)
-
-        threshold = np.median(scores)
-        preds = (scores < threshold).astype(int)
-        acc = (preds == labels).mean()
+    labels = np.array(labels)
+    fpr, tpr, thresholds = roc_curve(labels, -scores)
+    optimal_idx = np.argmax(tpr - fpr)
+    optimal_threshold = thresholds[optimal_idx]
+    preds = (scores < -optimal_threshold).astype(int)
+    acc = (preds == labels).mean()
     return acc
 
 def plot_score_distribution(model, triples, labels, entity2id=None, relation2id=None, device='cpu'):
@@ -223,7 +219,7 @@ def main():
         num_relations=len(relation2id),
         embedding_dim=200,
         learning_rate=0.001,
-        epochs=300,
+        epochs=10,
         batch_size=128,
         device='cuda'
     )

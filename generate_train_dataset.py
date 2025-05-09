@@ -85,6 +85,8 @@ def main():
     negative_samples = [(s, p, o, 0) for s, p, o in negative_triples]
 
     merged = positive_samples_downsampled + negative_samples
+    random.shuffle(merged)
+
     save_dataset(merged, output_file)
 
     print(f"Объединённый датасет сохранён в {output_file}")
