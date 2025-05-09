@@ -37,55 +37,46 @@ def generate_hard_negative_samples_batch(
     model, pos_batch, num_entities, triples_set,
     num_hard_neg=1, max_candidates=20, device='cpu'
 ):
-    """
-    Быстрая батчевая генерация hard negative samples для TransE.
-    Для каждого триплета в батче генерирует по num_hard_neg hard negative,
-    меняя head или tail, выбирает наиболее "трудные" негативы по скору модели.
-    """
     model.eval()
     batch_size = pos_batch.size(0)
     pos_batch = pos_batch.to(device)
-
     hard_negatives = []
-
     for i in range(batch_size):
         h, r, t = pos_batch[i].tolist()
-
-        candidates = []
-        while len(candidates) < max_candidates:
-            candidate = random.randint(0, num_entities - 1)
-            if candidate != h and (candidate, r, t) not in triples_set:
-                candidates.append(candidate)
-        head_cands = torch.tensor(candidates, device=device)
-        rel = torch.tensor([r]*max_candidates, device=device)
-        tail = torch.tensor([t]*max_candidates, device=device)
-        scores = model(head_cands, rel, tail)
-        topk = torch.topk(scores, k=num_hard_neg, largest=False)
-        for idx in topk.indices.cpu().numpy():
-            hard_negatives.append((candidates[idx], r, t))
-
-    for i in range(batch_size):
-        h, r, t = pos_batch[i].tolist()
-        candidates = []
-        while len(candidates) < max_candidates:
-            candidate = random.randint(0, num_entities - 1)
-            if candidate != t and (h, r, candidate) not in triples_set:
-                candidates.append(candidate)
-        head = torch.tensor([h]*max_candidates, device=device)
-        rel = torch.tensor([r]*max_candidates, device=device)
-        tail_cands = torch.tensor(candidates, device=device)
-        scores = model(head, rel, tail_cands)
-        topk = torch.topk(scores, k=num_hard_neg, largest=False)
-        for idx in topk.indices.cpu().numpy():
-            hard_negatives.append((h, r, candidates[idx]))
-
+        if random.random() < 0.5:
+            candidates = []
+            while len(candidates) < max_candidates:
+                candidate = random.randint(0, num_entities - 1)
+                if candidate != h and (candidate, r, t) not in triples_set:
+                    candidates.append(candidate)
+            head_cands = torch.tensor(candidates, device=device)
+            rel = torch.tensor([r]*max_candidates, device=device)
+            tail = torch.tensor([t]*max_candidates, device=device)
+            scores = model(head_cands, rel, tail)
+            topk = torch.topk(scores, k=num_hard_neg, largest=False)
+            for idx in topk.indices.cpu().numpy():
+                hard_negatives.append((candidates[idx], r, t))
+        else:
+            candidates = []
+            while len(candidates) < max_candidates:
+                candidate = random.randint(0, num_entities - 1)
+                if candidate != t and (h, r, candidate) not in triples_set:
+                    candidates.append(candidate)
+            head = torch.tensor([h]*max_candidates, device=device)
+            rel = torch.tensor([r]*max_candidates, device=device)
+            tail_cands = torch.tensor(candidates, device=device)
+            scores = model(head, rel, tail_cands)
+            topk = torch.topk(scores, k=num_hard_neg, largest=False)
+            for idx in topk.indices.cpu().numpy():
+                hard_negatives.append((h, r, candidates[idx]))
     return hard_negatives
 
 def train_transe(triples, num_entities, num_relations,
                  embedding_dim=50, learning_rate=0.01, epochs=10, batch_size=128, device='cpu'):
     model = TransE(num_entities, num_relations, embedding_dim).to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    loss_fn = nn.MarginRankingLoss(margin=1.0)
+
+    loss_fn = nn.SoftMarginLoss()
 
     triples_set = set(tuple(triple) for triple in triples)
     dataset = TriplesDataset(triples)
@@ -120,14 +111,15 @@ def train_transe(triples, num_entities, num_relations,
             neg_scores = model(head_neg, rel_neg, tail_neg)
             target = torch.ones_like(pos_scores)
 
-            min_len = min(len(pos_scores), len(neg_scores))
-            loss = loss_fn(neg_scores[:min_len], pos_scores[:min_len], target[:min_len])
+            loss = loss_fn(pos_scores - neg_scores, target)
             loss.backward()
             optimizer.step()
             epoch_loss += loss.item()
 
         avg_loss = epoch_loss / len(dataloader)
         print(f"Epoch {epoch + 1}/{epochs}, Loss: {avg_loss:.4f}")
+        val_acc = evaluate(model, val_triples, val_labels, device=device)
+        print(f"Validation Accuracy: {val_acc:.4f}")
 
     return model.entity_embeddings.weight.data.cpu().numpy(), model.relation_embeddings.weight.data.cpu().numpy(), model
 
@@ -174,13 +166,14 @@ if __name__ == "__main__":
         triples, labels, test_size=0.2, random_state=42
     )
 
-    entity_embeddings, relation_embeddings, model = train_transe(
-        train_triples, num_entities, num_relations,
-        embedding_dim=200, learning_rate=0.001, epochs=300, batch_size=128, device=device
+    train_triples, val_triples, train_labels, val_labels = train_test_split(
+        train_triples, train_labels, test_size=0.2, random_state=42
     )
 
-    test_acc = evaluate(model, test_triples, test_labels, device=device)
-    print(f"Test Accuracy: {test_acc:.4f}")
+    entity_embeddings, relation_embeddings, model = train_transe(
+        train_triples, num_entities, num_relations,
+        embedding_dim=300, learning_rate=0.001, epochs=300, batch_size=128, device=device
+    )
 
     np.save('embeddings/relation_embeddings.npy', relation_embeddings)
     np.save('embeddings/entity_embeddings.npy', entity_embeddings)
