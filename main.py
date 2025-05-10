@@ -38,21 +38,36 @@ def retrieve_candidates(head, relation, top_m=5):
     return candidates
 
 
-def get_ego_graph(head):
-    """Получает эго-граф для заданной сущности."""
-    return [f"{h}-{r}-{t}" for h, r, t in triples_raw_all if h == head][:3]
+def get_ego_graph(entity, triples, max_edges=3):
+    """Получает эго-граф (до max_edges) для заданной сущности."""
+    return [f"{h}-{r}-{t}" for h, r, t in triples if h == entity or t == entity][:max_edges]
 
-def build_prompt(head, relation, candidates):
-    """Строит промпт для LLM с четкой инструкцией и примером формата ответа."""
-    context = "\n".join(get_ego_graph(head))
+def build_prompt(head, relation, candidates, triples=triples_raw_all):
+    """
+    Строит промпт для LLM:
+    - Включает эго-граф head и каждого кандидата (tail)
+    - Явно просит выбрать только из списка
+    - Добавляет пример формата ответа
+    """
+    context_head = "\n".join(get_ego_graph(head, triples))
+    context_tails = []
+    for cand in candidates:
+        ego = get_ego_graph(cand, triples)
+        if ego:
+            context_tails.append(f"Эго-граф кандидата {cand}:\n" + "\n".join(ego))
+    context_tails_str = "\n\n".join(context_tails)
     prompt = (
-        f"Контекст:\n{context}\n\n"
+        f"Контекст:\n"
+        f"Эго-граф head-сущности ({head}):\n{context_head}\n\n"
+        f"{context_tails_str}\n\n"
         f"Задание:\n"
         f"Дана неполная тройка: {head} - {relation} - ?\n"
         f"Варианты кандидатов для объекта:\n"
         + "\n".join(f"- {c}" for c in candidates) +
         "\n\n"
-        "Выбери ОДНОГО наиболее вероятного кандидата из списка и верни ТОЛЬКО его."
+        "Выбери ОДНОГО наиболее вероятного кандидата (URI) из списка и верни ТОЛЬКО его.\n"
+        "Пример формата ответа:\n"
+        f"{candidates[0]}"
     )
     return prompt
 
@@ -100,22 +115,32 @@ async def send_to_llm(prompt, api_url):
 
 def parse_llm_answer(response, candidates):
     """
-    Парсит ответ LLM и возвращает одного кандидата из списка candidates.
-    Работает устойчиво к разным форматам ответа.
+    Извлекает одного кандидата из списка candidates из ответа LLM.
+    Работает устойчиво к разным форматам (одиночный URI, пункт списка, кавычки, лишние слова).
     """
-    response_clean = response.strip().lower()
+    response = response.strip().lower()
+
     for c in candidates:
-        if c.lower() == response_clean:
+        if response == c.lower():
             return c
 
     for c in candidates:
-        if c.lower() in response_clean:
+        pattern = r'[\s"\'>-]' + re.escape(c.lower()) + r'[\s"\'.<,-]'
+        if re.search(pattern, f' {response} '):
             return c
 
     for c in candidates:
-        pattern = re.escape(c.lower())
-        if re.search(pattern, response_clean):
+        if c.lower() in response:
             return c
+
+    lines = response.splitlines()
+    for line in lines:
+        line = line.strip('-:> ').strip()
+        for c in candidates:
+            if line == c.lower():
+                return c
+            if c.lower() in line:
+                return c
 
     return None
 
@@ -155,7 +180,7 @@ def main():
     llm_api_url = "http://172.21.32.1:1234/v1/completions"
     print("\nОценка качества LLM с кандидатами TransE...")
     llm_metrics = asyncio.run(evaluate_llm_with_transe_candidates(
-    test_triples[:100],
+    test_triples[:1000],
         llm_api_url, top_m=5
     ))
 
