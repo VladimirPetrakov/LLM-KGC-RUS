@@ -1,7 +1,8 @@
 import numpy as np
 import requests
-from triplets import load_labeled_triples, load_triples
-from triplets import load_json_from_file
+from triplets import load_labeled_triples, load_triples, load_json_from_file
+from sklearn.model_selection import train_test_split
+import asyncio
 import re
 
 triples_raw_all, entities, relations = load_triples('dataset/relations_ru.txt')
@@ -39,13 +40,10 @@ def retrieve_candidates(head, relation, top_m=5):
 
 def get_ego_graph(head):
     """Получает эго-граф для заданной сущности."""
-    return [f"{h}-{r}-{t}" for h, r, t in triples_raw if h == head][:3]
-
+    return [f"{h}-{r}-{t}" for h, r, t in triples_raw_all if h == head][:3]
 
 def build_prompt(head, relation, candidates):
-    """
-    Строит промпт для LLM с четкой инструкцией и примером формата ответа.
-    """
+    """Строит промпт для LLM с четкой инструкцией и примером формата ответа."""
     context = "\n".join(get_ego_graph(head))
     prompt = (
         f"Контекст:\n{context}\n\n"
@@ -54,100 +52,117 @@ def build_prompt(head, relation, candidates):
         f"Варианты кандидатов для объекта:\n"
         + "\n".join(f"- {c}" for c in candidates) +
         "\n\n"
-        "Выбери ОДНОГО наиболее вероятного кандидата (URI) из списка и верни ТОЛЬКО его URI без комментариев и пояснений.\n"
-        "Если не можешь выбрать, верни только 'None'.\n"
-        "Пример формата ответа:\n"
-        "http://ru.dbpedia.org/resource/Some_Entity\n"
+        "Выбери ОДНОГО наиболее вероятного кандидата из списка и верни ТОЛЬКО его."
     )
     return prompt
 
+def evaluate_candidate_retrieval(test_triples, top_n_values=[1, 3, 5, 10]):
+    """
+    Оценивает качество функции retrieve_candidates на тестовых триплетах.
+    Возвращает метрики Hits@N, MRR и Mean Rank.
+    """
+    hits_at_n = {n: 0 for n in top_n_values}
+    reciprocal_ranks = []
+    mean_ranks = []
+    total = 0
+    for h, r, t in test_triples:
+        if h not in entity2id or r not in relation2id or t not in entity2id:
+            continue
+        all_candidates = retrieve_candidates(h, r, top_m=len(entities)-1)
+        if t in all_candidates:
+            rank = all_candidates.index(t) + 1
+            reciprocal_ranks.append(1.0 / rank)
+            mean_ranks.append(rank)
+            for n in top_n_values:
+                if rank <= n:
+                    hits_at_n[n] += 1
+        else:
+            mean_ranks.append(len(entities))
+            reciprocal_ranks.append(0)
+        total += 1
+    metrics = {
+        "MRR": sum(reciprocal_ranks) / total if total else 0,
+        "MeanRank": sum(mean_ranks) / total if total else 0
+    }
+    for n in top_n_values:
+        metrics[f"Hits@{n}"] = hits_at_n[n] / total if total else 0
+    return metrics
 
-def rerank_with_llm(prompt):
-    """Отправляет запрос к LLM и получает ответ."""
+async def send_to_llm(prompt, api_url):
+    """Отправляет промпт в LLM API и возвращает ответ."""
     try:
-        response = requests.post(
-            "http://192.168.208.1:1234/v1/completions",
-            json={
-                "prompt": prompt,
-                "temperature": 0,
-                "max_tokens": 150
-            },
-            timeout=10
-        )
-        response.raise_for_status()
-        text = response.json()['choices'][0]['text'].strip()
-        return text
+        resp = requests.post(api_url, json={"prompt": prompt, "max_tokens": 50})
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["text"].strip()
     except Exception as e:
-        print(f"Ошибка при запросе к LLM: {e}")
-        return "Ошибка при ранжировании кандидатов."
+        print(f"Ошибка при обращении к LLM API: {e}")
+        return ""
 
-def parse_llm_response(response_text, candidates):
+def parse_llm_answer(response, candidates):
     """
-    Парсит ответ LLM и возвращает наиболее вероятного tail-кандидата.
+    Парсит ответ LLM и возвращает одного кандидата из списка candidates.
+    Работает устойчиво к разным форматам ответа.
     """
-    response_text = response_text.strip()
-    if response_text.lower() == 'none':
-        return None
+    response_clean = response.strip().lower()
+    for c in candidates:
+        if c.lower() == response_clean:
+            return c
 
-    response_text = re.sub(r'[\[\]\(\)\'\"\`]', '', response_text)
+    for c in candidates:
+        if c.lower() in response_clean:
+            return c
 
-    for cand in candidates:
-        if cand == response_text:
-            return cand
-
-    for cand in candidates:
-        if cand in response_text:
-            return cand
-
-    for line in response_text.splitlines():
-        line = line.strip()
-        for cand in candidates:
-            if cand == line:
-                return cand
-            if cand in line:
-                return cand
+    for c in candidates:
+        pattern = re.escape(c.lower())
+        if re.search(pattern, response_clean):
+            return c
 
     return None
 
-def add_triple_to_dataset(head, relation, tail, file_path):
-    """
-    Добавляет новый триплет в датасет и сохраняет его.
-    """
-    if (head, relation, tail) not in triples_raw:
-        triples_raw.append((head, relation, tail))
-        with open(file_path, 'w+', encoding='utf-8') as f:
-            f.write(f"{head}\t{relation}\t{tail}\n")
+async def evaluate_llm_with_transe_candidates(test_triples, llm_api_url, top_m=5):
+    """Оценивает, насколько хорошо LLM выбирает правильный ответ из кандидатов TransE."""
+    correct_count = 0
+    total = 0
+    for h, r, t in test_triples:
+        if h not in entity2id or r not in relation2id or t not in entity2id:
+            continue
+        candidates = retrieve_candidates(h, r, top_m=top_m)
+        if t not in candidates:
+            continue
+        prompt = build_prompt(h, r, candidates)
+        response = await send_to_llm(prompt, llm_api_url)
+        chosen = parse_llm_answer(response, candidates)
+        if chosen is not None and chosen == t:
+            correct_count += 1
+        total += 1
+    llm_accuracy = correct_count / total if total > 0 else 0
+    return {
+        "LLM_Accuracy": llm_accuracy,
+        "Total_Evaluated": total,
+        "Correct_Count": correct_count
+    }
 
-def knowledge_graph_completion_and_add(head, relation, file_path):
-    tail = knowledge_graph_completion(head, relation)
+def main():
+    train_triples, test_triples, train_labels, test_labels = train_test_split(
+        triples_raw, labels, test_size=0.2, random_state=42
+    )
+    print("Оценка качества извлечения кандидатов (TransE)...")
+    metrics = evaluate_candidate_retrieval(test_triples, top_n_values=[1, 3, 5, 10])
+    print("\nМетрики TransE:")
+    for metric, value in metrics.items():
+        print(f"{metric}: {value:.4f}")
 
-    if tail:
-        add_triple_to_dataset(head, relation, tail, file_path)
+    llm_api_url = "http://172.21.32.1:1234/v1/completions"
+    print("\nОценка качества LLM с кандидатами TransE...")
+    llm_metrics = asyncio.run(evaluate_llm_with_transe_candidates(
+    test_triples[:100],
+        llm_api_url, top_m=5
+    ))
 
-        return tail
-    else:
-        print("Не удалось распарсить ответ LLM.")
+    print("\nМетрики LLM:")
 
-def knowledge_graph_completion(head, relation):
-    """Основная функция для завершения графа знаний."""
-    existing = [t for h, r, t in triples_raw if h == head and r == relation]
+    for metric, value in llm_metrics.items():
+         print(f"{metric}: {value}")
 
-    if existing:
-        return existing[0]
-
-    candidates = retrieve_candidates(head, relation)
-
-    if not candidates:
-        return None
-
-    prompt = build_prompt(head, relation, candidates)
-
-    llm_response = rerank_with_llm(prompt)
-    tail = parse_llm_response(llm_response, candidates)
-
-    return tail
-
-output_file = 'dataset/relations_ru_completed.txt'
-
-for triple in triples_raw_all:
-    result = knowledge_graph_completion_and_add(triple[0], triple[1], output_file)
+if __name__ == "__main__":
+    main()
