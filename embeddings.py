@@ -221,7 +221,7 @@ def main():
         learning_rate=0.001,
         epochs=10,
         batch_size=128,
-        device='cuda'
+        device=device
     )
 
     test_acc = evaluate(model, test_triples_ids, test_labels, device=device)
