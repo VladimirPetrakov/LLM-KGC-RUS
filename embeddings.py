@@ -219,7 +219,7 @@ def main():
         num_relations=len(relation2id),
         embedding_dim=200,
         learning_rate=0.001,
-        epochs=10,
+        epochs=8,
         batch_size=128,
         device=device
     )

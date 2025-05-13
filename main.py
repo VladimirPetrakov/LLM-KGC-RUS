@@ -1,6 +1,6 @@
 import numpy as np
 import requests
-from triplets import load_labeled_triples, load_triples, load_json_from_file
+from triplets import load_labeled_triples, load_triples, load_json_from_file, save_labeled_triples
 from sklearn.model_selection import train_test_split
 import asyncio
 import re
@@ -148,6 +148,9 @@ async def evaluate_llm_with_transe_candidates(test_triples, llm_api_url, top_m=5
     """Оценивает, насколько хорошо LLM выбирает правильный ответ из кандидатов TransE."""
     correct_count = 0
     total = 0
+
+    result_candidates = []
+
     for h, r, t in test_triples:
         if h not in entity2id or r not in relation2id or t not in entity2id:
             continue
@@ -159,12 +162,16 @@ async def evaluate_llm_with_transe_candidates(test_triples, llm_api_url, top_m=5
         chosen = parse_llm_answer(response, candidates)
         if chosen is not None and chosen == t:
             correct_count += 1
+            result_candidates.append((h, r, t, 1))
+        else:
+            result_candidates.append((h, r, t, 0))
         total += 1
     llm_accuracy = correct_count / total if total > 0 else 0
     return {
         "LLM_Accuracy": llm_accuracy,
         "Total_Evaluated": total,
-        "Correct_Count": correct_count
+        "Correct_Count": correct_count,
+        "Result_candidates": result_candidates,
     }
 
 def main():
@@ -177,17 +184,23 @@ def main():
     for metric, value in metrics.items():
         print(f"{metric}: {value:.4f}")
 
-    llm_api_url = "http://172.21.32.1:1234/v1/completions"
+    llm_api_url = "http://172.26.176.1:1234/v1/completions"
     print("\nОценка качества LLM с кандидатами TransE...")
-    llm_metrics = asyncio.run(evaluate_llm_with_transe_candidates(
-    test_triples[:1000],
+    llm_res = asyncio.run(evaluate_llm_with_transe_candidates(
+    test_triples[:25000],
         llm_api_url, top_m=5
     ))
 
     print("\nМетрики LLM:")
 
-    for metric, value in llm_metrics.items():
-         print(f"{metric}: {value}")
+    metrics = ["LLM_Accuracy", "Total_Evaluated", "Correct_Count"]
+
+    for metric in metrics:
+         print(f"{metric}: {llm_res[metric]}")
+
+    result_candidates = llm_res["Result_candidates"]
+
+    save_labeled_triples('dataset/relations_ru_completed.tsv', result_candidates)
 
 if __name__ == "__main__":
     main()

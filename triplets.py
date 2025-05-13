@@ -30,6 +30,12 @@ def load_labeled_triples(file_path):
 
     return triples, labels
 
+def save_labeled_triples(file_path, triples):
+    with open(file_path, 'w+', encoding='utf-8') as f:
+        for (h, r, t, label) in triples:
+            line = f"{h}\t{r}\t{t}\t{label}\n"
+            f.write(line)
+
 def save_json_to_file(file_path, jsonData):
     with open(file_path, 'w') as file:
         json.dump(jsonData, file)
