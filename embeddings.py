@@ -185,11 +185,11 @@ def plot_score_distribution(model, triples, labels, entity2id=None, relation2id=
     scores = np.array(scores)
 
     plt.figure(figsize=(8,6))
-    plt.hist(scores[labels_array == 1], bins=50, alpha=0.6, label='Позитивные')
-    plt.hist(scores[labels_array == 0], bins=50, alpha=0.6, label='Негативные')
+    plt.hist(scores[labels_array == 1], bins=50, alpha=0.6, label='Корректные')
+    plt.hist(scores[labels_array == 0], bins=50, alpha=0.6, label='Некорректные')
     plt.xlabel('Score (расстояние)')
     plt.ylabel('Количество')
-    plt.title('Распределение скорингов модели TransE')
+    plt.title('Распределение оценок расстояний модели TransE')
     plt.legend()
     plt.show()
 

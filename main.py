@@ -58,7 +58,7 @@ def build_prompt(head, relation, candidates, triples=triples_raw_all):
     context_tails_str = "\n\n".join(context_tails)
     prompt = (
         f"Контекст:\n"
-        f"Эго-граф head-сущности ({head}):\n{context_head}\n\n"
+        f"Эго-граф субъекта ({head}):\n{context_head}\n\n"
         f"{context_tails_str}\n\n"
         f"Задание:\n"
         f"Дана неполная тройка: {head} - {relation} - ?\n"
