@@ -178,13 +178,16 @@ def main():
     train_triples, test_triples, train_labels, test_labels = train_test_split(
         triples_raw, labels, test_size=0.2, random_state=42
     )
+
+    test_triples = [tr for tr, label in zip(test_triples, test_labels) if label == 1]
+
     print("Оценка качества извлечения кандидатов (TransE)...")
     metrics = evaluate_candidate_retrieval(test_triples, top_n_values=[1, 3, 5, 10])
     print("\nМетрики TransE:")
     for metric, value in metrics.items():
         print(f"{metric}: {value:.4f}")
 
-    llm_api_url = "http://172.26.176.1:1234/v1/completions"
+    llm_api_url = "http://172.30.160.1:1234/v1/completions"
     print("\nОценка качества LLM с кандидатами TransE...")
     llm_res = asyncio.run(evaluate_llm_with_transe_candidates(
     test_triples[:25000],
