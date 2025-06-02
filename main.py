@@ -144,11 +144,32 @@ def parse_llm_answer(response, candidates):
 
     return None
 
-async def evaluate_llm_with_transe_candidates(test_triples, llm_api_url, top_m=5):
-    """Оценивает, насколько хорошо LLM выбирает правильный ответ из кандидатов TransE."""
-    correct_count = 0
-    total = 0
+def calculate_metrics_from_ranks(ranks, top_n_values=[1, 3, 5, 10]):
+    hits_at_n = {n: 0 for n in top_n_values}
+    reciprocal_ranks = []
+    mean_ranks = []
 
+    for rank in ranks:
+        reciprocal_ranks.append(1.0 / rank)
+        mean_ranks.append(rank)
+        for n in top_n_values:
+            if rank <= n:
+                hits_at_n[n] += 1
+
+    total = len(ranks)
+    metrics = {
+        "MRR": sum(reciprocal_ranks) / total if total else 0,
+        "MeanRank": sum(mean_ranks) / total if total else 0
+    }
+    for n in top_n_values:
+        metrics[f"Hits@{n}"] = hits_at_n[n] / total if total else 0
+    return metrics
+
+async def evaluate_llm_with_transe_candidates(test_triples, llm_api_url, top_m=5, top_n_values=[1, 3, 5, 10]):
+    """Оценивает LLM с кандидатами TransE и считает метрики MRR, Hits@N, MeanRank."""
+    total = 0
+    ranks = []
+    correct_count = 0
     result_candidates = []
 
     for h, r, t in test_triples:
@@ -157,22 +178,34 @@ async def evaluate_llm_with_transe_candidates(test_triples, llm_api_url, top_m=5
         candidates = retrieve_candidates(h, r, top_m=top_m)
         if t not in candidates:
             continue
+
         prompt = build_prompt(h, r, candidates)
         response = await send_to_llm(prompt, llm_api_url)
         chosen = parse_llm_answer(response, candidates)
-        if chosen is not None and chosen == t:
+
+        if chosen == t:
+            rank = candidates.index(t) + 1 if t in candidates else len(candidates) + 1
+        else:
+            rank = len(candidates) + 1
+
+        ranks.append(rank)
+
+        if chosen == t:
             correct_count += 1
             result_candidates.append((h, r, t, 1))
         else:
             result_candidates.append((h, r, t, 0))
+
         total += 1
+
     llm_accuracy = correct_count / total if total > 0 else 0
-    return {
-        "LLM_Accuracy": llm_accuracy,
-        "Total_Evaluated": total,
-        "Correct_Count": correct_count,
-        "Result_candidates": result_candidates,
-    }
+    metrics = calculate_metrics_from_ranks(ranks, top_n_values=top_n_values)
+    metrics["LLM_Accuracy"] = llm_accuracy
+    metrics["Total_Evaluated"] = total
+    metrics["Correct_Count"] = correct_count
+    metrics["Result_candidates"] = result_candidates
+
+    return metrics
 
 def main():
     train_triples, test_triples, train_labels, test_labels = train_test_split(
@@ -187,23 +220,21 @@ def main():
     for metric, value in metrics.items():
         print(f"{metric}: {value:.4f}")
 
-    llm_api_url = "http://172.30.160.1:1234/v1/completions"
+    llm_api_url = "http://172.22.128.1:1234/v1/completions"
     print("\nОценка качества LLM с кандидатами TransE...")
     llm_res = asyncio.run(evaluate_llm_with_transe_candidates(
-    test_triples[:25000],
-        llm_api_url, top_m=5
+        test_triples[:25000],
+        llm_api_url,
+        top_m=10,
+        top_n_values=[1, 3, 5, 10]
     ))
 
     print("\nМетрики LLM:")
+    for metric in ["LLM_Accuracy", "Total_Evaluated", "Correct_Count", "MRR", "MeanRank", "Hits@1", "Hits@3", "Hits@5", "Hits@10"]:
+        if metric in llm_res:
+            print(f"{metric}: {llm_res[metric]:.4f}")
 
-    metrics = ["LLM_Accuracy", "Total_Evaluated", "Correct_Count"]
-
-    for metric in metrics:
-         print(f"{metric}: {llm_res[metric]}")
-
-    result_candidates = llm_res["Result_candidates"]
-
-    save_labeled_triples('dataset/relations_ru_completed.tsv', result_candidates)
+    save_labeled_triples('dataset/relations_ru_completed.tsv', llm_res["Result_candidates"])
 
 if __name__ == "__main__":
     main()
