@@ -225,7 +225,7 @@ def main():
     llm_res = asyncio.run(evaluate_llm_with_transe_candidates(
         test_triples[:25000],
         llm_api_url,
-        top_m=10,
+        top_m=5,
         top_n_values=[1, 3, 5, 10]
     ))
 
